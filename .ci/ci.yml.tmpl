@@ -79,7 +79,6 @@ jobs:
     - name: authorize-single-rev
       plan:
           - get: magic-modules-external-prs
-            version: every
             trigger: false
           - put: magic-modules-new-prs
             params:
@@ -243,6 +242,8 @@ jobs:
           passed: [mm-generate]
         - task: test
           file: magic-modules/.ci/unit-tests/inspec.yml
+          params:
+            TERRAFORM_KEY: ((terraform-key))
           timeout: 30m
           on_failure:
               do:
@@ -378,3 +379,11 @@ jobs:
                 merge:
                     method: squash
                     commit_msg: mm-output/commit_message
+    - name: inspec-integration-test
+      serial: true
+      plan:
+        - get: magic-modules-new-prs
+        - task: inspec-integration
+          file: magic-modules-new-prs/.ci/acceptance-tests/inspec-integration.yml
+          params:
+            TERRAFORM_KEY: ((terraform-key))

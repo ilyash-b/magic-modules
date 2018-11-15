@@ -31,13 +31,9 @@ module Provider
   class Core
     include Compile::Core
 
-    attr_reader :test_data
-
     def initialize(config, api)
       @config = config
       @api = api
-      @generated = []
-      @sourced = []
       @max_columns = DEFAULT_FORMAT_OPTIONS[:max_columns]
     end
 
@@ -49,7 +45,6 @@ module Provider
       generate_objects(output_folder, types, version_name)
       copy_files(output_folder) \
         unless @config.files.nil? || @config.files.copy.nil?
-      compile_examples(output_folder) unless @config.examples.nil?
       compile_changelog(output_folder) unless @config.changelog.nil?
       # Compilation has to be the last step, as some files (e.g.
       # CONTRIBUTING.md) may depend on the list of all files previously copied
@@ -62,8 +57,6 @@ module Provider
 
       generate_datasources(output_folder, types, version_name) \
         unless @config.datasources.nil?
-      apply_file_acls(output_folder) \
-        unless @config.files.nil? || @config.files.permissions.nil?
     end
 
     def copy_files(output_folder)
@@ -79,6 +72,10 @@ module Provider
       copy_file_list(output_folder, files)
     end
 
+    def compile_files(output_folder, version_name)
+      compile_file_list(output_folder, @config.files.compile, version: version_name)
+    end
+
     def compile_common_files(output_folder, version_name = nil)
       provider_name = self.class.name.split('::').last.downcase
       return unless File.exist?("provider/#{provider_name}/common~compile.yaml")
@@ -92,15 +89,10 @@ module Provider
       files.each do |target, source|
         target_file = File.join(output_folder, target)
         target_dir = File.dirname(target_file)
-        @sourced << relative_path(target_file, output_folder)
         Google::LOGGER.debug "Copying #{source} => #{target}"
         FileUtils.mkpath target_dir unless Dir.exist?(target_dir)
         FileUtils.copy_entry source, target_file
       end
-    end
-
-    def compile_files(output_folder, version_name)
-      compile_file_list(output_folder, @config.files.compile, version: version_name)
     end
 
     def compile_examples(output_folder)
@@ -125,33 +117,6 @@ module Provider
       )
     end
 
-    def apply_file_acls(output_folder)
-      @config.files.permissions.each do |perm|
-        Google::LOGGER.info "Permission #{perm.path} => #{perm.acl}"
-        FileUtils.chmod perm.acl, File.join(output_folder, perm.path)
-      end
-    end
-
-    def compile_file_map(output_folder, section, mapper)
-      create_object_list(section, mapper).each do |o|
-        compile_file_list(
-          output_folder,
-          o
-        )
-      end
-    end
-
-    # Creates an object list by calling a lambda
-    # This can be useful for converting a list of config values to something
-    # less human-centric.
-    def create_object_list(section, mapper)
-      @api.objects
-          .select { |o| section.key?(o.name) }
-          .map do |o|
-            Hash[section[o.name].map { |file| mapper.call(o, file) }]
-          end
-    end
-
     def compile_file_list(output_folder, files, data = {})
       files.each do |target, source|
         Google::LOGGER.debug "Compiling #{source} => #{target}"
@@ -169,8 +134,6 @@ module Provider
             manifest: manifest,
             tests: '',
             template: source,
-            generated_files: @generated,
-            sourced_files: @sourced,
             compiler: compiler,
             output_folder: output_folder,
             out_file: target_file,
@@ -279,38 +242,13 @@ module Provider
        ')'].join("\n")
     end
 
-    def extract_variables(template)
-      template.scan(/{{[^}]*}}/)
-              .map { |v| v.gsub(/{{([^}]*)}}/, '\1') }
-              .map(&:to_sym)
-    end
-
-    def variable_type(object, var)
-      return Api::Type::String::PROJECT if var == :project
-      return Api::Type::String::NAME if var == :name
-      v = object.all_user_properties
-                .select { |p| p.out_name.to_sym == var || p.name.to_sym == var }
-                .first
-      return v.property if v.is_a?(Api::Type::ResourceRef)
-      v
-    end
-
-    # Used to convert a string 'a b c' into a\ b\ c for use in %w[...] form
-    def str2warray(value)
-      unquote_string(value).gsub(/ /, '\\ ')
-    end
-
+    # TODO(rileykarson): Rehome this function.
+    # For some reason the corresponding quote_string function lives in compile/core.rb
+    # and no beside this function.
     def unquote_string(value)
       return value.gsub(/"(.*)"/, '\1') if value.start_with?('"')
       return value.gsub(/'(.*)'/, '\1') if value.start_with?("'")
       value
-    end
-
-    # TODO(alexstephen): Retire in favor of a real code object.
-    # No validation is possible on get_code_multiline
-    def get_code_multiline(config, node)
-      search = node.class <= Array ? node : [node]
-      Google::HashUtils.navigate(config, search)
     end
 
     def true?(obj)
@@ -319,18 +257,6 @@ module Provider
 
     def false?(obj)
       obj.to_s.casecmp('false').zero?
-    end
-
-    def get_style_exceptions(file_name, type, name)
-      styles = @config.style
-      return [] if styles.nil?
-      styles.select { |s| s.name == file_name }
-            .map(&:pinpoints)
-            .flatten
-            .select { |ps| ps.any? { |k, v| k.to_sym == type && v == name } }
-            .map { |p| p['exceptions'] }
-            .flatten
-            .sort
     end
 
     def emit_link(name, url, emit_self, extra_data = false)
@@ -438,9 +364,9 @@ module Provider
 
     def generate_file(data)
       file_folder = File.dirname(data[:out_file])
+      # This variable looks unused, but is used in ansible/resource.erb
       file_relative = relative_path(data[:out_file], data[:output_folder]).to_s
       FileUtils.mkpath file_folder unless Dir.exist?(file_folder)
-      @generated << relative_path(data[:out_file], data[:output_folder])
       ctx = binding
       data.each { |name, value| ctx.local_variable_set(name, value) }
       generate_file_write ctx, data
